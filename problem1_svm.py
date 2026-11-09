@@ -1,28 +1,13 @@
 import csv
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import when, col
+from pyspark.sql.functions import col, when
 
 from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.classification import LinearSVC, OneVsRest
+from pyspark.ml.evaluation import MulticlassClassificationEvaluator
+from pyspark.ml.tuning import CrossValidator, ParamGridBuilder
 
-from pyspark.ml.classification import (
-    LinearSVC,
-    OneVsRest,
-)
-
-from pyspark.ml.evaluation import (
-    MulticlassClassificationEvaluator,
-)
-
-from pyspark.ml.tuning import (
-    CrossValidator,
-    ParamGridBuilder,
-)
-
-
-# ---------------------------------------------------------
-# Create the Spark session
-# ---------------------------------------------------------
 
 spark = (
     SparkSession.builder
@@ -30,19 +15,10 @@ spark = (
     .getOrCreate()
 )
 
-# Reduce unnecessary Spark INFO messages.
 spark.sparkContext.setLogLevel("WARN")
 
 
-# ---------------------------------------------------------
-# Input file
-# ---------------------------------------------------------
-
-INPUT_FILE = (
-    "/home/pcherukuri3/"
-    "Assignment4/"
-    "iris.csv"
-)
+INPUT_FILE = "/home/pcherukuri3/Assignment4/iris.csv"
 
 SPECIES_NAMES = [
     "setosa",
@@ -52,7 +28,7 @@ SPECIES_NAMES = [
 
 
 # ---------------------------------------------------------
-# Read the Iris CSV file
+# Load Iris data
 # ---------------------------------------------------------
 
 iris = (
@@ -64,23 +40,14 @@ iris = (
 
 
 print("\n=== IRIS DATASET ===")
-
-iris.show(
-    10,
-    truncate=False,
-)
+iris.show(10, truncate=False)
 
 print("\n=== IRIS SCHEMA ===")
-
 iris.printSchema()
 
-print(
-    "Total Iris rows:",
-    iris.count(),
-)
+print("Total Iris records:", iris.count())
 
-
-print("\n=== NUMBER OF RECORDS PER SPECIES ===")
+print("\n=== RECORDS PER SPECIES ===")
 
 iris.groupBy(
     "species"
@@ -90,46 +57,37 @@ iris.groupBy(
 
 
 # ---------------------------------------------------------
-# Convert text species into numeric labels
-#
-# setosa      = 0
-# versicolor  = 1
-# virginica   = 2
+# Convert species to numeric label
 # ---------------------------------------------------------
 
 labeled = iris.withColumn(
     "label",
-
     when(
         col("species") == "setosa",
-        0.0
+        0.0,
     )
-
     .when(
         col("species") == "versicolor",
-        1.0
+        1.0,
     )
-
     .when(
         col("species") == "virginica",
-        2.0
+        2.0,
     )
 )
 
 
 # ---------------------------------------------------------
-# Combine the 4 measurements into the features column
+# Create feature vector
 # ---------------------------------------------------------
 
 assembler = VectorAssembler(
-
     inputCols=[
         "sepal_length",
         "sepal_width",
         "petal_length",
         "petal_width",
     ],
-
     outputCol="features",
 )
 
@@ -137,22 +95,20 @@ assembler = VectorAssembler(
 data = (
     assembler
     .transform(labeled)
-
     .select(
+        "species",
+        "label",
+        "features",
         "sepal_length",
         "sepal_width",
         "petal_length",
         "petal_width",
-        "species",
-        "label",
-        "features",
     )
-
     .cache()
 )
 
 
-print("\n=== PREPARED SVM DATA ===")
+print("\n=== PREPARED DATA ===")
 
 data.show(
     10,
@@ -161,137 +117,95 @@ data.show(
 
 
 # ---------------------------------------------------------
-# Split data into training and testing sets
+# Independent test set
+#
+# Cross validation is performed on the training portion.
+# The held-out test portion provides an additional
+# independent evaluation and confusion matrix.
 # ---------------------------------------------------------
 
 training, test = data.randomSplit(
-
     [0.8, 0.2],
-
     seed=42,
 )
-
 
 training = training.cache()
 test = test.cache()
 
 
-print(
-    "Training rows:",
-    training.count(),
-)
+training_count = training.count()
+test_count = test.count()
 
-print(
-    "Test rows:",
-    test.count(),
-)
+
+print("Training records:", training_count)
+print("Test records:", test_count)
 
 
 # ---------------------------------------------------------
-# Create the Linear Support Vector Machine
+# Binary Linear SVM
 # ---------------------------------------------------------
 
-lsvc = LinearSVC(
-
+svm = LinearSVC(
     featuresCol="features",
-
     labelCol="label",
-
     maxIter=100,
-
     regParam=0.1,
 )
 
 
 # ---------------------------------------------------------
-# Iris has 3 classes.
-# LinearSVC is binary.
-# Therefore use One-vs-Rest.
+# Convert binary LinearSVC to multiclass classifier.
 # ---------------------------------------------------------
 
 ovr = OneVsRest(
-
-    classifier=lsvc,
-
+    classifier=svm,
     featuresCol="features",
-
     labelCol="label",
-
     predictionCol="prediction",
-
     parallelism=2,
 )
 
 
-# ---------------------------------------------------------
-# Accuracy evaluator
-# ---------------------------------------------------------
-
 evaluator = MulticlassClassificationEvaluator(
-
     labelCol="label",
-
     predictionCol="prediction",
-
     metricName="accuracy",
 )
 
 
-# ---------------------------------------------------------
-# Parameter grid
-#
-# We are mainly using CrossValidator for the required
-# 10-fold evaluation.
-# ---------------------------------------------------------
-
+# One fixed SVM configuration evaluated through
+# the required ten folds.
 param_grid = (
     ParamGridBuilder()
     .build()
 )
 
 
-# ---------------------------------------------------------
-# 10-fold Cross Validation
-# ---------------------------------------------------------
-
-crossval = CrossValidator(
-
+cross_validator = CrossValidator(
     estimator=ovr,
-
     estimatorParamMaps=param_grid,
-
     evaluator=evaluator,
-
     numFolds=10,
-
     parallelism=2,
-
     seed=42,
 )
 
 
 print(
     "\nRunning Linear SVM + One-vs-Rest "
-    "with 10-fold cross validation..."
+    "with 10-fold cross-validation..."
 )
 
 
-# ---------------------------------------------------------
-# Train using cross validation
-# ---------------------------------------------------------
-
-cv_model = crossval.fit(
+cv_model = cross_validator.fit(
     training
 )
 
 
-# Average validation accuracy across the folds
-cv_accuracy = cv_model.avgMetrics[0]
+cv_accuracy = float(
+    cv_model.avgMetrics[0]
+)
 
-
-# ---------------------------------------------------------
-# Test the best model
-# ---------------------------------------------------------
 
 predictions = (
     cv_model
@@ -300,8 +214,8 @@ predictions = (
 )
 
 
-test_accuracy = evaluator.evaluate(
-    predictions
+test_accuracy = float(
+    evaluator.evaluate(predictions)
 )
 
 
@@ -316,106 +230,64 @@ print(
 )
 
 
-# ---------------------------------------------------------
-# Display predictions
-# ---------------------------------------------------------
-
-print(
-    "\n=== SVM PREDICTIONS ==="
-)
-
+print("\n=== SVM PREDICTIONS ===")
 
 predictions.select(
-
     "species",
-
     "label",
-
     "prediction",
-
 ).orderBy(
-
     "label",
-
     "prediction",
-
 ).show(
-
-    test.count(),
-
+    test_count,
     truncate=False,
 )
 
 
 # ---------------------------------------------------------
-# Confusion Matrix
-#
-# The professor's lecture uses:
-# groupBy("label", "prediction").count()
+# Confusion matrix
 # ---------------------------------------------------------
+
+confusion = (
+    predictions
+    .groupBy(
+        "label",
+        "prediction",
+    )
+    .count()
+    .orderBy(
+        "label",
+        "prediction",
+    )
+)
+
 
 print(
     "\n=== SVM CONFUSION MATRIX COUNTS ==="
 )
 
+confusion.show()
 
-confusion_counts = (
-
-    predictions
-
-    .groupBy(
-        "label",
-        "prediction"
-    )
-
-    .count()
-
-    .orderBy(
-        "label",
-        "prediction"
-    )
-)
-
-
-confusion_counts.show()
-
-
-# ---------------------------------------------------------
-# Convert confusion counts into a 3 x 3 matrix
-# ---------------------------------------------------------
 
 matrix = [
-
     [0, 0, 0],
-
     [0, 0, 0],
-
     [0, 0, 0],
 ]
 
 
-for row in confusion_counts.collect():
+for row in confusion.collect():
 
-    actual = int(
-        row["label"]
-    )
+    actual = int(row["label"])
+    predicted = int(row["prediction"])
 
-    predicted = int(
-        row["prediction"]
-    )
-
-    matrix[
-        actual
-    ][
-        predicted
-    ] = int(
+    matrix[actual][predicted] = int(
         row["count"]
     )
 
 
-print(
-    "\nSVM Confusion Matrix:"
-)
+print("\nSVM Confusion Matrix")
 
 print(
     "Actual / Predicted    "
@@ -423,25 +295,29 @@ print(
 )
 
 
-for i, row in enumerate(
-    matrix
-):
+for index, values in enumerate(matrix):
 
     print(
-
-        f"{SPECIES_NAMES[i]:18}"
-
-        f"{row[0]:8}"
-
-        f"{row[1]:13}"
-
-        f"{row[2]:12}"
+        f"{SPECIES_NAMES[index]:18}"
+        f"{values[0]:8}"
+        f"{values[1]:13}"
+        f"{values[2]:12}"
     )
 
 
 # ---------------------------------------------------------
-# Save individual predictions to CSV
+# Save predictions
 # ---------------------------------------------------------
+
+prediction_rows = predictions.select(
+    "species",
+    "prediction",
+    "sepal_length",
+    "sepal_width",
+    "petal_length",
+    "petal_width",
+).collect()
+
 
 with open(
     "svm_predictions.csv",
@@ -449,9 +325,7 @@ with open(
     newline="",
 ) as file:
 
-    writer = csv.writer(
-        file
-    )
+    writer = csv.writer(file)
 
     writer.writerow(
         [
@@ -465,56 +339,27 @@ with open(
         ]
     )
 
-
-    for row in predictions.select(
-
-        "species",
-
-        "prediction",
-
-        "sepal_length",
-
-        "sepal_width",
-
-        "petal_length",
-
-        "petal_width",
-
-    ).collect():
-
+    for row in prediction_rows:
 
         predicted_species = (
             SPECIES_NAMES[
-                int(
-                    row["prediction"]
-                )
+                int(row["prediction"])
             ]
         )
-
 
         writer.writerow(
             [
                 row["species"],
-
                 predicted_species,
-
                 row["species"]
                 == predicted_species,
-
                 row["sepal_length"],
-
                 row["sepal_width"],
-
                 row["petal_length"],
-
                 row["petal_width"],
             ]
         )
 
-
-# ---------------------------------------------------------
-# Save confusion matrix
-# ---------------------------------------------------------
 
 with open(
     "svm_confusion_matrix.csv",
@@ -522,9 +367,7 @@ with open(
     newline="",
 ) as file:
 
-    writer = csv.writer(
-        file
-    )
+    writer = csv.writer(file)
 
     writer.writerow(
         [
@@ -535,29 +378,32 @@ with open(
         ]
     )
 
-
-    for i, row in enumerate(
-        matrix
-    ):
+    for index, values in enumerate(matrix):
 
         writer.writerow(
             [
-                SPECIES_NAMES[i],
-                row[0],
-                row[1],
-                row[2],
+                SPECIES_NAMES[index],
+                values[0],
+                values[1],
+                values[2],
             ]
         )
 
-
-# ---------------------------------------------------------
-# Save accuracy results
-# ---------------------------------------------------------
 
 with open(
     "svm_metrics.txt",
     "w",
 ) as file:
+
+    file.write(
+        f"Training records: "
+        f"{training_count}\n"
+    )
+
+    file.write(
+        f"Test records: "
+        f"{test_count}\n"
+    )
 
     file.write(
         f"10-fold CV accuracy: "
@@ -570,21 +416,10 @@ with open(
     )
 
 
-print(
-    "\nCreated:"
-)
-
-print(
-    "svm_predictions.csv"
-)
-
-print(
-    "svm_confusion_matrix.csv"
-)
-
-print(
-    "svm_metrics.txt"
-)
+print("\nFiles created:")
+print("svm_predictions.csv")
+print("svm_confusion_matrix.csv")
+print("svm_metrics.txt")
 
 
 spark.stop()
